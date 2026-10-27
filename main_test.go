@@ -18,10 +18,10 @@ const testProfile = `{"id":"0123456789abcdef0123456789abcdef","name":"Player","p
 func resetHandlerState(t *testing.T) {
 	t.Helper()
 	authClients = nil
-	playerCache = sync.Map{}
+	playerCache = newUpstreamCache(defaultCacheMaxEntries, defaultCacheTTL)
 	t.Cleanup(func() {
 		authClients = nil
-		playerCache = sync.Map{}
+		playerCache = newUpstreamCache(defaultCacheMaxEntries, defaultCacheTTL)
 	})
 }
 

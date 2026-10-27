@@ -16,6 +16,8 @@ Yggdrasil Proxy (本工具)
 
 服务器通过 `authlib-injector` 将认证请求指向本代理。代理默认按配置的优先级依次尝试上游 Yggdrasil 服务，并缓存玩家上次认证成功的上游。后续请求优先向缓存上游重新验证，未成功时再按优先级尝试其他上游；同一次请求不会重复尝试相同的上游 URL。缓存只记录上游关联，不缓存或复用认证结果。
 
+缓存默认最多保存 10,000 条关联，每条关联自最近一次成功认证起有效 24 小时；只有认证成功才刷新有效期，读取缓存或认证失败不会续期。每 10 分钟后台清理过期记录，查询和写入时也会清理相应过期记录。达到容量上限时，淘汰最久没有成功认证的关联。过期或淘汰只影响上游尝试顺序，不影响认证判定。
+
 `hasJoined` 的结果分为三类：
 
 - **成功**：上游返回 `200`，响应是有效的角色 JSON，包含 32 位十六进制 UUID（`id`）和非空角色名（`name`）。代理原样返回响应内容，并更新玩家的上游缓存。响应体最大为 1 MiB，超过限制视为上游错误。
@@ -36,29 +38,9 @@ docker pull ghcr.io/deshark42/yggdrasil-proxy:latest
 
 ### 2. 配置
 
-创建 `config.json`：
+参考 [配置示例](<config.example.json>) 创建 `config.json`，并按下方配置说明调整。
 
-```json
-{
-    "port": 32217,
-    "authServers": [
-        {
-            "priority": 0,
-            "name": "Mojang",
-            "url": "https://sessionserver.mojang.com",
-            "timeout": 5
-        },
-        {
-            "priority": 1,
-            "name": "LittleSkin",
-            "url": "https://littleskin.cn/api/yggdrasil/sessionserver",
-            "timeout": 5
-        }
-    ]
-}
-```
-
-配置文件不存在时，首次启动会自动生成上述默认配置。
+配置文件不存在时，首次启动会自动生成默认配置。Docker Compose 启动前需先准备好配置文件。
 
 ### 3. 启动
 
@@ -115,11 +97,16 @@ docker compose -f docker-compose.build.yml up -d --build
 | 字段 | 说明 |
 |------|------|
 | `port` | 监听端口，默认 `32217` |
+| `cache.ttlSeconds` | 关联自最近一次成功认证起的有效期（秒），默认 `86400`（24 小时） |
+| `cache.cleanupIntervalSeconds` | 后台清理间隔（秒），默认 `600`（10 分钟） |
+| `cache.maxEntries` | 最大关联条目数，默认 `10000` |
 | `authServers` | 认证服务器列表，按 `priority` 从小到大依次尝试 |
 | `priority` | 优先级，数值越小越优先 |
 | `name` | 标识名，仅用于日志 |
 | `url` | Yggdrasil 认证服务地址 |
 | `timeout` | 请求超时时间（秒） |
+
+缓存配置均为正整数；省略 `cache` 或其中的字段时使用相应默认值，因此旧配置无需修改。过期记录在下一次后台清理前可能仍占用空间，但查询时不会命中，且总条目数始终受容量上限约束。缓存不是整个容器的内存限额。
 
 ## API
 

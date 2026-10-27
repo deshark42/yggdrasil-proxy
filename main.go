@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,12 +11,11 @@ import (
 	"net/url"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
 var (
-	playerCache  sync.Map
+	playerCache  = newUpstreamCache(defaultCacheMaxEntries, defaultCacheTTL)
 	authClients  []*authClient
 	metaResponse []byte
 )
@@ -30,6 +30,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+
+	playerCache = newUpstreamCache(cfg.Cache.MaxEntries, time.Duration(cfg.Cache.TTLSeconds)*time.Second)
+	cleanupContext, stopCleanup := context.WithCancel(context.Background())
+	defer stopCleanup()
+	go playerCache.runCleanup(cleanupContext, time.Duration(cfg.Cache.CleanupIntervalSeconds)*time.Second)
 
 	sort.Slice(cfg.AuthServers, func(i, j int) bool {
 		return cfg.AuthServers[i].Priority < cfg.AuthServers[j].Priority
@@ -96,7 +101,7 @@ func hasJoinedHandler(w http.ResponseWriter, r *http.Request) {
 
 	clients := make([]*authClient, 0, len(authClients)+1)
 	if cachedURL, ok := playerCache.Load(username); ok {
-		if ac := findClient(cachedURL.(string)); ac != nil {
+		if ac := findClient(cachedURL); ac != nil {
 			clients = append(clients, ac)
 		}
 	}

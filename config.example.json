@@ -1,5 +1,10 @@
 {
     "port": 32217,
+    "cache": {
+        "ttlSeconds": 86400,
+        "cleanupIntervalSeconds": 600,
+        "maxEntries": 10000
+    },
     "authServers": [
         {
             "priority": 0,
