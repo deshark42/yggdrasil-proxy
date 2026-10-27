@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -66,6 +69,22 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(metaResponse)
 }
 
+type authOutcome int
+
+const (
+	upstreamError authOutcome = iota
+	authSuccess
+	authNoMatch
+)
+
+const maxProfileResponseSize = 1 << 20
+
+type authResult struct {
+	outcome authOutcome
+	body    []byte
+	err     error
+}
+
 func hasJoinedHandler(w http.ResponseWriter, r *http.Request) {
 	username := r.URL.Query().Get("username")
 	serverID := r.URL.Query().Get("serverId")
@@ -75,25 +94,49 @@ func hasJoinedHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 尝试从缓存读取
+	clients := make([]*authClient, 0, len(authClients)+1)
 	if cachedURL, ok := playerCache.Load(username); ok {
 		if ac := findClient(cachedURL.(string)); ac != nil {
-			if ac.proxyRequest(w, r, username, serverID) {
-				return
-			}
-			log.Printf("Cached server %s failed for %s, removing cache", cachedURL, username)
-			playerCache.Delete(username)
+			clients = append(clients, ac)
 		}
 	}
+	clients = append(clients, authClients...)
 
-	// 按优先级遍历所有服务器
-	for _, ac := range authClients {
-		if ac.proxyRequest(w, r, username, serverID) {
-			playerCache.Store(username, ac.server.URL)
+	attempted := make(map[string]bool, len(clients))
+	hadError := false
+	for _, ac := range clients {
+		if r.Context().Err() != nil {
 			return
 		}
+		if attempted[ac.server.URL] {
+			continue
+		}
+		attempted[ac.server.URL] = true
+
+		result := ac.proxyRequest(r, username, serverID)
+		if r.Context().Err() != nil {
+			return
+		}
+		switch result.outcome {
+		case authSuccess:
+			playerCache.Store(username, ac.server.URL)
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write(result.body); err != nil {
+				log.Printf("Failed to write authentication response: %v", err)
+			}
+			return
+		case authNoMatch:
+			continue
+		case upstreamError:
+			hadError = true
+			log.Printf("Upstream %s failed: %v", ac.server.Name, result.err)
+		}
 	}
 
+	if hadError {
+		http.Error(w, "authentication upstream error", http.StatusBadGateway)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -106,33 +149,66 @@ func findClient(url string) *authClient {
 	return nil
 }
 
-func (ac *authClient) proxyRequest(w http.ResponseWriter, r *http.Request, username, serverID string) bool {
-	proxyURL := fmt.Sprintf("%s/session/minecraft/hasJoined?username=%s&serverId=%s",
-		ac.server.URL, username, serverID)
+func (ac *authClient) proxyRequest(r *http.Request, username, serverID string) authResult {
+	proxyURL, err := url.Parse(ac.server.URL)
+	if err != nil || (proxyURL.Scheme != "http" && proxyURL.Scheme != "https") || proxyURL.Host == "" {
+		return authResult{outcome: upstreamError, err: fmt.Errorf("invalid upstream URL")}
+	}
+	proxyURL.Path = strings.TrimRight(proxyURL.Path, "/") + "/session/minecraft/hasJoined"
+	proxyURL.RawPath = ""
+	query := proxyURL.Query()
+	query.Set("username", username)
+	query.Set("serverId", serverID)
+	if ip := r.URL.Query().Get("ip"); ip != "" {
+		query.Set("ip", ip)
+	} else {
+		query.Del("ip")
+	}
+	proxyURL.RawQuery = query.Encode()
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, proxyURL, nil)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, proxyURL.String(), nil)
 	if err != nil {
-		log.Printf("Error creating request for %s: %v", ac.server.Name, err)
-		return false
+		return authResult{outcome: upstreamError, err: fmt.Errorf("create request: %w", err)}
 	}
 
 	resp, err := ac.client.Do(req)
 	if err != nil {
-		log.Printf("Request to %s failed: %v", ac.server.Name, err)
-		return false
+		return authResult{outcome: upstreamError, err: fmt.Errorf("request failed: %w", err)}
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return false
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return authResult{outcome: authNoMatch}
+	case http.StatusOK:
+	default:
+		return authResult{outcome: upstreamError, err: fmt.Errorf("unexpected HTTP status %d", resp.StatusCode)}
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil || len(body) == 0 {
-		return false
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxProfileResponseSize+1))
+	if err != nil {
+		return authResult{outcome: upstreamError, err: fmt.Errorf("read profile: %w", err)}
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(body)
-	return true
+	if len(body) > maxProfileResponseSize {
+		return authResult{outcome: upstreamError, err: fmt.Errorf("profile response exceeds %d bytes", maxProfileResponseSize)}
+	}
+	var profile struct {
+		ID         string `json:"id"`
+		Name       string `json:"name"`
+		Properties []struct {
+			Name      string `json:"name"`
+			Value     string `json:"value"`
+			Signature string `json:"signature"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(body, &profile); err != nil {
+		return authResult{outcome: upstreamError, err: fmt.Errorf("invalid profile JSON: %w", err)}
+	}
+	if len(profile.ID) != 32 || strings.TrimSpace(profile.Name) == "" {
+		return authResult{outcome: upstreamError, err: fmt.Errorf("profile must contain a UUID and name")}
+	}
+	if _, err := hex.DecodeString(profile.ID); err != nil {
+		return authResult{outcome: upstreamError, err: fmt.Errorf("invalid profile UUID: %w", err)}
+	}
+	return authResult{outcome: authSuccess, body: body}
 }
