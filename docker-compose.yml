@@ -1,0 +1,13 @@
+services:
+  yggdrasil-proxy:
+    image: ghcr.io/deshark42/yggdrasil-proxy:latest
+    restart: unless-stopped
+    ports:
+      - "32217:32217"
+    volumes:
+      - type: bind
+        source: ./config.json
+        target: /app/config.json
+        read_only: true
+        bind:
+          create_host_path: false

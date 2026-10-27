@@ -72,16 +72,35 @@ docker pull ghcr.io/deshark42/yggdrasil-proxy:latest
 docker run -d -p 32217:32217 -v ./config.json:/app/config.json ghcr.io/deshark42/yggdrasil-proxy:latest
 ```
 
-**Docker Compose：**
-```yaml
-services:
-  yggdrasil-proxy:
-    image: ghcr.io/deshark42/yggdrasil-proxy:latest
-    ports:
-      - "32217:32217"
-    volumes:
-      - ./config.json:/app/config.json
+**Docker Compose（从 GHCR 拉取镜像）：**
+
+仓库提供 `docker-compose.yml`。如果尚未创建配置文件，先复制示例，再启动：
+
+```bash
+cp config.example.json config.json
+# 按需编辑 config.json；已有配置时跳过复制步骤
+docker compose pull
+docker compose up -d
 ```
+
+配置文件以只读方式挂载；文件不存在时会报错，而不是自动创建同名目录。默认映射端口为 `32217:32217`，修改配置中的监听端口时应同步修改 Compose 的容器端口。
+
+查看日志或停止服务：
+
+```bash
+docker compose logs -f
+docker compose down
+```
+
+**可选：从本仓库源码构建**
+
+准备好配置文件后，显式叠加 `docker-compose.build.yml`：
+
+```bash
+docker compose -f docker-compose.build.yml up -d --build
+```
+
+此方式从当前仓库构建，使用本地镜像名 `yggdrasil-proxy:local`，不会拉取或覆盖 GHCR 镜像标签；端口、配置挂载和重启策略沿用默认配置。后续重新构建、查看日志或停止服务时，可使用相同的两组 `-f` 参数。默认执行 `docker compose up -d` 不会加载这个构建选项。
 
 ### 4. 连接 Minecraft 服务器
 
