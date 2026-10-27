@@ -1,0 +1,7 @@
+.git
+.github
+config.json
+yggdrasil-proxy
+*.test
+*.out
+*.log

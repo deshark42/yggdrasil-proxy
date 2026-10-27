@@ -22,9 +22,11 @@ Yggdrasil Proxy (本工具)
 
 - **成功**：上游返回 `200`，响应是有效的角色 JSON，包含 32 位十六进制 UUID（`id`）和非空角色名（`name`）。代理原样返回响应内容，并更新玩家的上游缓存。响应体最大为 1 MiB，超过限制视为上游错误。
 - **未通过验证**：上游返回 `204`，继续尝试其他上游，不因本次验证失败删除缓存。
-- **上游错误**：网络故障、超时、其他 HTTP 状态码、响应读取失败或无效角色资料。记录错误并继续尝试其他上游，不因此删除缓存。
+- **上游错误**：网络故障、超时、其他 HTTP 状态码、响应读取失败或无效角色资料。记录错误并继续尝试其他上游，不因此删除缓存。不会跟随上游的 HTTP 重定向，`3xx` 同样视为上游错误。
 
 任一上游成功时返回 `200`；全部上游均返回 `204` 时返回 `204`；没有成功且至少一个上游发生错误时返回 `502 Bad Gateway`。这与旧版本将所有失败统一返回 `204` 的行为不同。下游请求取消后停止尝试，不更新缓存。请求中的可选 `ip` 参数会转发给上游。
+
+整个认证过程共享一个总超时预算，默认 15 秒；各上游仍受自己的 `timeout` 限制。总预算耗尽时停止后续尝试，返回 `502`，不更新缓存。HTTP 服务另外设置了请求头读取 5 秒、请求读取 10 秒、空闲连接 60 秒的超时；响应写入上限为认证总预算加 5 秒。
 
 ## 快速开始
 
@@ -40,7 +42,7 @@ docker pull ghcr.io/deshark42/yggdrasil-proxy:latest
 
 参考 [配置示例](<config.example.json>) 创建 `config.json`，并按下方配置说明调整。
 
-配置文件不存在时，首次启动会自动生成默认配置。Docker Compose 启动前需先准备好配置文件。
+直接运行时，配置文件不存在且当前目录可写，首次启动会自动生成默认配置。镜像内置默认配置；使用 Docker 或 Docker Compose 挂载自定义配置时，需先准备好配置文件。
 
 ### 3. 启动
 
@@ -51,12 +53,12 @@ docker pull ghcr.io/deshark42/yggdrasil-proxy:latest
 
 **Docker：**
 ```bash
-docker run -d -p 32217:32217 -v ./config.json:/app/config.json ghcr.io/deshark42/yggdrasil-proxy:latest
+docker run -d -p 32217:32217 -v ./config.json:/app/config.json:ro ghcr.io/deshark42/yggdrasil-proxy:latest
 ```
 
 **Docker Compose（从 GHCR 拉取镜像）：**
 
-仓库提供 `docker-compose.yml`。如果尚未创建配置文件，先复制示例，再启动：
+仓库提供 [docker-compose.yml](<docker-compose.yml>)。如果尚未创建配置文件，先复制示例，再启动：
 
 ```bash
 cp config.example.json config.json
@@ -67,6 +69,8 @@ docker compose up -d
 
 配置文件以只读方式挂载；文件不存在时会报错，而不是自动创建同名目录。默认映射端口为 `32217:32217`，修改配置中的监听端口时应同步修改 Compose 的容器端口。
 
+镜像以非 root 用户 `10001:10001` 运行，挂载的配置文件必须允许该 UID 或 GID 读取。仅宿主用户可读的 `0600` 文件无法直接使用；可调整属组并使用 `0640` 权限，或在配置不含敏感信息时使用 `0644`。
+
 查看日志或停止服务：
 
 ```bash
@@ -76,10 +80,10 @@ docker compose down
 
 **可选：从本仓库源码构建**
 
-准备好配置文件后，显式叠加 `docker-compose.build.yml`：
+准备好配置文件后，显式叠加 [docker-compose.build.yml](<docker-compose.build.yml>)：
 
 ```bash
-docker compose -f docker-compose.build.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 此方式从当前仓库构建，使用本地镜像名 `yggdrasil-proxy:local`，不会拉取或覆盖 GHCR 镜像标签；端口、配置挂载和重启策略沿用默认配置。后续重新构建、查看日志或停止服务时，可使用相同的两组 `-f` 参数。默认执行 `docker compose up -d` 不会加载这个构建选项。
@@ -96,15 +100,18 @@ docker compose -f docker-compose.build.yml up -d --build
 
 | 字段 | 说明 |
 |------|------|
-| `port` | 监听端口，默认 `32217` |
+| `port` | 监听端口，范围 `1–65535`，默认 `32217` |
+| `authTimeoutSeconds` | 整个认证过程的总超时（秒），默认 `15`；省略时使用默认值 |
 | `cache.ttlSeconds` | 关联自最近一次成功认证起的有效期（秒），默认 `86400`（24 小时） |
 | `cache.cleanupIntervalSeconds` | 后台清理间隔（秒），默认 `600`（10 分钟） |
 | `cache.maxEntries` | 最大关联条目数，默认 `10000` |
 | `authServers` | 认证服务器列表，按 `priority` 从小到大依次尝试 |
 | `priority` | 优先级，数值越小越优先 |
 | `name` | 标识名，仅用于日志 |
-| `url` | Yggdrasil 认证服务地址 |
-| `timeout` | 请求超时时间（秒） |
+| `url` | 必须为带主机名的绝对 HTTP(S) 地址，支持路径前缀 |
+| `timeout` | 单个上游请求的超时（秒），必须配置为正整数，不允许 `0` 或省略 |
+
+端口、上游 URL 和所有超时配置都会在启动时校验；超时值必须为正整数，且不能超过 Go 时间类型的可表示范围（认证总预算还需预留 5 秒响应写入时间）。旧配置省略 `authTimeoutSeconds` 时仍可使用默认值，但上游 `timeout` 为 `0` 或缺失的配置需要修正。
 
 缓存配置均为正整数；省略 `cache` 或其中的字段时使用相应默认值，因此旧配置无需修改。过期记录在下一次后台清理前可能仍占用空间，但查询时不会命中，且总条目数始终受容量上限约束。缓存不是整个容器的内存限额。
 
@@ -116,6 +123,8 @@ docker compose -f docker-compose.build.yml up -d --build
 | `GET /sessionserver/session/minecraft/hasJoined?username=<玩家>&serverId=<id>` | 玩家认证代理 |
 
 ## 从源码构建
+
+需要 Go 1.27.3 或更新版本；最低版本见 [go.mod](<go.mod>)，镜像构建使用相同版本。
 
 ```bash
 git clone https://github.com/deshark42/yggdrasil-proxy.git

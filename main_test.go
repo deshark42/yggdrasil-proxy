@@ -29,14 +29,14 @@ func addTestUpstream(t *testing.T, handler http.HandlerFunc) *authClient {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	client := &authClient{server: AuthServer{URL: server.URL}, client: server.Client()}
+	client := newAuthClient(AuthServer{URL: server.URL, Timeout: 5})
 	authClients = append(authClients, client)
 	return client
 }
 
 func callHasJoined(target string) *httptest.ResponseRecorder {
 	recorder := httptest.NewRecorder()
-	hasJoinedHandler(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+	hasJoinedHandler(defaultAuthTimeout)(recorder, httptest.NewRequest(http.MethodGet, target, nil))
 	return recorder
 }
 
@@ -462,7 +462,7 @@ func TestHasJoinedCancellation(t *testing.T) {
 			}
 			ctx = context.WithValue(ctx, testContextKey{}, "incoming")
 			request := httptest.NewRequest(http.MethodGet, "/hasJoined?username=Player&serverId=hash", nil).WithContext(ctx)
-			hasJoinedHandler(httptest.NewRecorder(), request)
+			hasJoinedHandler(defaultAuthTimeout)(httptest.NewRecorder(), request)
 			if when == "before request" {
 				calls.assert(t)
 			} else {

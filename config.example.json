@@ -1,5 +1,6 @@
 {
     "port": 32217,
+    "authTimeoutSeconds": 15,
     "cache": {
         "ttlSeconds": 86400,
         "cleanupIntervalSeconds": 600,

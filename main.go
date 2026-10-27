@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -41,12 +40,7 @@ func main() {
 	})
 
 	for _, s := range cfg.AuthServers {
-		authClients = append(authClients, &authClient{
-			server: s,
-			client: &http.Client{
-				Timeout: time.Duration(s.Timeout) * time.Second,
-			},
-		})
+		authClients = append(authClients, newAuthClient(s))
 	}
 
 	metaResponse, _ = json.Marshal(map[string]string{
@@ -54,13 +48,9 @@ func main() {
 		"version": "1.0",
 	})
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", rootHandler)
-	mux.HandleFunc("/sessionserver/session/minecraft/hasJoined", hasJoinedHandler)
-
-	addr := fmt.Sprintf(":%d", cfg.Port)
-	log.Printf("Starting Yggdrasil Proxy on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	server := newHTTPServer(cfg)
+	log.Printf("Starting Yggdrasil Proxy on %s", server.Addr)
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
@@ -90,59 +80,66 @@ type authResult struct {
 	err     error
 }
 
-func hasJoinedHandler(w http.ResponseWriter, r *http.Request) {
-	username := r.URL.Query().Get("username")
-	serverID := r.URL.Query().Get("serverId")
+func hasJoinedHandler(timeout time.Duration) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		username := r.URL.Query().Get("username")
+		serverID := r.URL.Query().Get("serverId")
 
-	if username == "" || serverID == "" {
-		http.Error(w, "missing username or serverId", http.StatusBadRequest)
-		return
-	}
-
-	clients := make([]*authClient, 0, len(authClients)+1)
-	if cachedURL, ok := playerCache.Load(username); ok {
-		if ac := findClient(cachedURL); ac != nil {
-			clients = append(clients, ac)
-		}
-	}
-	clients = append(clients, authClients...)
-
-	attempted := make(map[string]bool, len(clients))
-	hadError := false
-	for _, ac := range clients {
-		if r.Context().Err() != nil {
+		if username == "" || serverID == "" {
+			http.Error(w, "missing username or serverId", http.StatusBadRequest)
 			return
 		}
-		if attempted[ac.server.URL] {
-			continue
-		}
-		attempted[ac.server.URL] = true
 
-		result := ac.proxyRequest(r, username, serverID)
-		if r.Context().Err() != nil {
-			return
-		}
-		switch result.outcome {
-		case authSuccess:
-			playerCache.Store(username, ac.server.URL)
-			w.Header().Set("Content-Type", "application/json")
-			if _, err := w.Write(result.body); err != nil {
-				log.Printf("Failed to write authentication response: %v", err)
+		requestContext := r.Context()
+		authContext, cancel := context.WithTimeout(requestContext, timeout)
+		defer cancel()
+		r = r.WithContext(authContext)
+
+		clients := make([]*authClient, 0, len(authClients)+1)
+		if cachedURL, ok := playerCache.Load(username); ok {
+			if ac := findClient(cachedURL); ac != nil {
+				clients = append(clients, ac)
 			}
-			return
-		case authNoMatch:
-			continue
-		case upstreamError:
-			hadError = true
-			log.Printf("Upstream %s failed: %v", ac.server.Name, result.err)
 		}
-	}
+		clients = append(clients, authClients...)
 
-	if hadError {
-		http.Error(w, "authentication upstream error", http.StatusBadGateway)
-		return
+		attempted := make(map[string]bool, len(clients))
+		hadError := false
+		for _, ac := range clients {
+			if authenticationStopped(w, requestContext, authContext) {
+				return
+			}
+			if attempted[ac.server.URL] {
+				continue
+			}
+			attempted[ac.server.URL] = true
+
+			result := ac.proxyRequest(r, username, serverID)
+			if authenticationStopped(w, requestContext, authContext) {
+				return
+			}
+			switch result.outcome {
+			case authSuccess:
+				playerCache.Store(username, ac.server.URL)
+				w.Header().Set("Content-Type", "application/json")
+				if _, err := w.Write(result.body); err != nil {
+					log.Printf("Failed to write authentication response: %v", err)
+				}
+				return
+			case authNoMatch:
+				continue
+			case upstreamError:
+				hadError = true
+				log.Printf("Upstream %s failed: %v", ac.server.Name, result.err)
+			}
+		}
+
+		if hadError {
+			http.Error(w, "authentication upstream error", http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func findClient(url string) *authClient {
@@ -155,8 +152,8 @@ func findClient(url string) *authClient {
 }
 
 func (ac *authClient) proxyRequest(r *http.Request, username, serverID string) authResult {
-	proxyURL, err := url.Parse(ac.server.URL)
-	if err != nil || (proxyURL.Scheme != "http" && proxyURL.Scheme != "https") || proxyURL.Host == "" {
+	proxyURL, err := parseAuthServerURL(ac.server.URL)
+	if err != nil {
 		return authResult{outcome: upstreamError, err: fmt.Errorf("invalid upstream URL")}
 	}
 	proxyURL.Path = strings.TrimRight(proxyURL.Path, "/") + "/session/minecraft/hasJoined"
