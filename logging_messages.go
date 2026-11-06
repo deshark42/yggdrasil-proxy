@@ -154,6 +154,9 @@ func consoleAttempt(f consoleFields) string {
 	} else {
 		sentence += "; no HTTP response was received."
 	}
+	if retry := f.number("retry"); retry > 0 {
+		sentence += fmt.Sprintf(" Retry %.0f of %.0f for this upstream.", retry, f.number("max_retries"))
+	}
 	if f.flag("cached") {
 		sentence += " This upstream was selected from the cache."
 	}

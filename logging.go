@@ -127,7 +127,7 @@ func (entry *authenticationLog) stopped(w http.ResponseWriter, requestContext, a
 	return true
 }
 
-func (entry *authenticationLog) attempt(ctx context.Context, server AuthServer, result authResult, started time.Time) {
+func (entry *authenticationLog) attempt(ctx context.Context, server AuthServer, result authResult, started time.Time, retry int) {
 	level, outcome := slog.LevelDebug, "upstream_error"
 	switch result.outcome {
 	case authSuccess:
@@ -144,8 +144,11 @@ func (entry *authenticationLog) attempt(ctx context.Context, server AuthServer, 
 		return
 	}
 	attrs := upstreamLogFields(server)
-	attrs = append(attrs, "attempt", entry.attempts, "cached", entry.cacheHit && entry.attempts == 1,
+	attrs = append(attrs, "attempt", entry.attempts, "cached", entry.cacheHit && entry.attempts == retry+1,
 		"status", result.status, "outcome", outcome, "duration_ms", durationMillis(started))
+	if retry > 0 {
+		attrs = append(attrs, "retry", retry, "max_retries", maxUpstreamRetries)
+	}
 	if result.reason != "" {
 		attrs = append(attrs, "reason", result.reason)
 	}

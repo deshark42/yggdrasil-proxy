@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 )
 
@@ -360,6 +362,52 @@ func TestHasJoinedMissingParameters(t *testing.T) {
 			calls.assert(t)
 			assertCachedURL(t, "Player", "unchanged")
 		})
+	}
+}
+
+func TestHasJoinedRecoversFromClosedConnectionsOnThirdAttempt(t *testing.T) {
+	resetHandlerState(t)
+	var calls atomic.Int32
+	client := addTestUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 2 {
+			connection, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack upstream connection: %v", err)
+				return
+			}
+			connection.Close()
+			return
+		}
+		_, _ = io.WriteString(w, testProfile)
+	})
+	response := callHasJoined("/hasJoined?username=Player&serverId=hash")
+	if response.Code != http.StatusOK || response.Body.String() != testProfile {
+		t.Fatalf("response = %d %q, want original profile", response.Code, response.Body.String())
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("upstream requests = %d, want 3", got)
+	}
+	assertCachedURL(t, "Player", client.server.URL)
+}
+
+func TestHasJoinedRetryLimitAppliesToEachUpstream(t *testing.T) {
+	resetHandlerState(t)
+	var calls testCallLog
+	for _, name := range []string{"first", "second"} {
+		client := newAuthClient(AuthServer{URL: "https://" + name + ".invalid", Timeout: 5})
+		client.client.Transport = testRoundTripper(func(*http.Request) (*http.Response, error) {
+			calls.add(name)
+			return nil, syscall.ECONNREFUSED
+		})
+		authClients = append(authClients, client)
+	}
+	response := callHasJoined("/hasJoined?username=Player&serverId=hash")
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", response.Code)
+	}
+	calls.assert(t, "first", "first", "first", "second", "second", "second")
+	if _, ok := playerCache.Load("Player"); ok {
+		t.Fatal("failed retries populated the cache")
 	}
 }
 

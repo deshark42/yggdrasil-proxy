@@ -89,10 +89,11 @@ const (
 const maxProfileResponseSize = 1 << 20
 
 type authResult struct {
-	outcome authOutcome
-	body    []byte
-	status  int
-	reason  string
+	outcome   authOutcome
+	body      []byte
+	status    int
+	reason    string
+	retryable bool
 }
 
 func hasJoinedHandler(timeout time.Duration) http.HandlerFunc {
@@ -133,12 +134,25 @@ func hasJoinedHandler(timeout time.Duration) http.HandlerFunc {
 			}
 			attempted[ac.server.URL] = true
 
-			requestLog.attempts++
-			attemptStarted := time.Now()
-			result := ac.proxyRequest(r, username, serverID)
-			requestLog.attempt(authContext, ac.server, result, attemptStarted)
-			if requestLog.stopped(w, requestContext, authContext) {
-				return
+			var result authResult
+			for retry := 0; retry < maxUpstreamAttempts; retry++ {
+				if retry > 0 && !waitForUpstreamRetry(authContext, retry) {
+					requestLog.stopped(w, requestContext, authContext)
+					return
+				}
+				if requestLog.stopped(w, requestContext, authContext) {
+					return
+				}
+				requestLog.attempts++
+				attemptStarted := time.Now()
+				result = ac.proxyRequest(r, username, serverID)
+				requestLog.attempt(authContext, ac.server, result, attemptStarted, retry)
+				if requestLog.stopped(w, requestContext, authContext) {
+					return
+				}
+				if !result.retryable {
+					break
+				}
 			}
 			switch result.outcome {
 			case authSuccess:
@@ -200,7 +214,7 @@ func (ac *authClient) proxyRequest(r *http.Request, username, serverID string) a
 
 	resp, err := ac.client.Do(req)
 	if err != nil {
-		return authResult{outcome: upstreamError, reason: requestErrorReason(err)}
+		return authResult{outcome: upstreamError, reason: requestErrorReason(err), retryable: retryableNetworkError(err)}
 	}
 	defer resp.Body.Close()
 
@@ -218,7 +232,7 @@ func (ac *authClient) proxyRequest(r *http.Request, username, serverID string) a
 		if reason == "request_error" {
 			reason = "response_read_error"
 		}
-		return authResult{outcome: upstreamError, status: resp.StatusCode, reason: reason}
+		return authResult{outcome: upstreamError, status: resp.StatusCode, reason: reason, retryable: retryableNetworkError(err)}
 	}
 	if len(body) > maxProfileResponseSize {
 		return authResult{outcome: upstreamError, status: resp.StatusCode, reason: "profile_too_large"}

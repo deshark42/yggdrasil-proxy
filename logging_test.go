@@ -391,14 +391,15 @@ func TestAuthenticationLogsRedactUpstreamFailures(t *testing.T) {
 		name, reason string
 		body         string
 		err          error
+		attempts     int
 	}{
-		{"JSON syntax", "invalid_profile_json", "!json-body-secret", nil},
-		{"JSON type", "invalid_profile_json", `{"id":"0123456789abcdef0123456789abcdef","name":{"json-body-secret":true}}`, nil},
-		{"network", "request_error", "", &url.Error{Op: "Get", URL: "https://error-user:error-password@error.invalid/error-path?token=error-query#fragment-secret", Err: errors.New("raw-error-secret")}},
-		{"upstream timeout", "upstream_timeout", "", testTimeoutError{}},
-		{"DNS", "dns_error", "", &net.DNSError{Err: "raw-error-secret", Name: "dns-secret.invalid"}},
-		{"connection", "connection_error", "", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}},
-		{"TLS", "tls_error", "", tls.RecordHeaderError{Msg: "tls-error-secret"}},
+		{"JSON syntax", "invalid_profile_json", "!json-body-secret", nil, 1},
+		{"JSON type", "invalid_profile_json", `{"id":"0123456789abcdef0123456789abcdef","name":{"json-body-secret":true}}`, nil, 1},
+		{"network", "request_error", "", &url.Error{Op: "Get", URL: "https://error-user:error-password@error.invalid/error-path?token=error-query#fragment-secret", Err: errors.New("raw-error-secret")}, 1},
+		{"upstream timeout", "upstream_timeout", "", testTimeoutError{}, 3},
+		{"DNS", "dns_error", "", &net.DNSError{Err: "raw-error-secret", Name: "dns-secret.invalid"}, 3},
+		{"connection", "connection_error", "", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}, 3},
+		{"TLS", "tls_error", "", tls.RecordHeaderError{Msg: "tls-error-secret"}, 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			resetHandlerState(t)
@@ -419,20 +420,25 @@ func TestAuthenticationLogsRedactUpstreamFailures(t *testing.T) {
 			}
 			records := decodeAuthenticationLogs(t, output)
 			assertAuthenticationCorrelation(t, records, response.Header().Get("X-Request-ID"), "Player")
-			summary := assertAuthenticationSummary(t, records, "upstream_error", "WARN", 502, 1)
+			summary := assertAuthenticationSummary(t, records, "upstream_error", "WARN", 502, test.attempts)
 			assertLoggingFields(t, summary, loggingRecord{"had_upstream_error": true})
 			attempts := authenticationEvents(records, "upstream_attempt")
-			if len(attempts) != 1 {
-				t.Fatalf("attempt logs = %d, want 1", len(attempts))
+			if len(attempts) != test.attempts {
+				t.Fatalf("attempt logs = %d, want %d", len(attempts), test.attempts)
 			}
 			status := 0
 			if test.err == nil {
 				status = 200
 			}
-			assertLoggingFields(t, attempts[0], loggingRecord{
-				"attempt": float64(1), "upstream": "safe-name", "upstream_host": "safe.invalid:8443",
-				"cached": false, "status": float64(status), "outcome": "upstream_error", "level": "WARN", "reason": test.reason,
-			})
+			for i, attempt := range attempts {
+				assertLoggingFields(t, attempt, loggingRecord{
+					"attempt": float64(i + 1), "upstream": "safe-name", "upstream_host": "safe.invalid:8443",
+					"cached": false, "status": float64(status), "outcome": "upstream_error", "level": "WARN", "reason": test.reason,
+				})
+				if i > 0 {
+					assertLoggingFields(t, attempt, loggingRecord{"retry": float64(i), "max_retries": float64(2)})
+				}
+			}
 			for _, secret := range []string{
 				"credential-user", "credential-password", "private-path", "config-query-secret", "fragment-secret",
 				"server-id-secret", "ip-secret", "error-user", "error-password", "error-path", "error-query",
