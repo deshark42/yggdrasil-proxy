@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -30,6 +31,7 @@ func newHTTPServer(cfg *Config) *http.Server {
 	return &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           mux,
+		ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		IdleTimeout:       60 * time.Second,

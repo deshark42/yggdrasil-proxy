@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strconv"
@@ -59,7 +60,7 @@ func LoadConfig(path string) (*Config, error) {
 			if writeErr := writeDefaultConfig(path, cfg); writeErr != nil {
 				return nil, fmt.Errorf("failed to write default config: %w", writeErr)
 			}
-			fmt.Printf("Config file not found, created default at %s\n", path)
+			slog.Info("default_config_created", "config_path", path)
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("failed to read config: %w", err)
